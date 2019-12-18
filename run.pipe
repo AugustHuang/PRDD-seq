@@ -1,0 +1,223 @@
+#!/bin/bash
+
+# softwares version
+#samtools: 0.1.19
+#bedtools: 2.23.0
+#gatk: 3.4-46
+#cnvnator: 0.3.2
+#annovar: 2015Mar22
+
+function preparation
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	
+	cat <(awk 'length($4)==1&&length($5)==1&&$4~/[ACGT]/&&$5~/[ACGT]/' ${REFERENCE_DIR}/human_annovar/hg19_ALL.sites.2015_08.txt | cut -f1,2) <(awk '$12=="single"' ${REFERENCE_DIR}/human_annovar/hg19_snp138NonFlagged.txt | cut -f2,4 | sed -e 's/chrM/chrMT/g'| sed -e 's/^chr//g') <(awk 'length($4)==1&&length($5)==1&&$4~/[ACGT]/&&$5~/[ACGT]/' ${REFERENCE_DIR}/human_annovar/hg19_esp6500si_all.txt | cut -f1,3) <(awk 'length($4)==1&&length($5)==1&&$4~/[ACGT]/&&$5~/[ACGT]/' ${REFERENCE_DIR}/human_annovar/hg19_exac03.txt | cut -f1,3) > ${REFERENCE_DIR}/human_annovar.all_poly.b37.tmp
+	mergeBed -i <(sortBed -i <(awk '{OFS="\t"; print $1,$2-1,$2}' ${REFERENCE_DIR}/human_annovar.all_poly.b37.tmp)) > ${REFERENCE_DIR}/human_annovar.all_poly.b37.bed
+}
+
+function bam_merge
+{
+	run_picard.sh MergeSamFiles $(ls ${PROJECT_NAME}/single-cell/*.bam | grep MDA | grep -v disc | awk '{printf "INPUT="$0" "}') OUTPUT=${PROJECT_NAME}/${PROJECT_NAME}.bam SORT_ORDER=coordinate CREATE_INDEX=TRUE VALIDATION_STRINGENCY=SILENT
+}
+
+function read_filter
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	SP_set MAX_NM=3
+	
+	# remove improper-paired, duplicated, multiple-hit and too-many-error reads
+	samtools view -f 2 -F 1024 -h ${PROJECT_NAME}/${PROJECT_NAME}.bam | perl -ne 'print if (/^@/||(/NM:i:(\d+)/&&$1<=${MAX_NM}))' | samtools view -Sb - > ${PROJECT_NAME}/${PROJECT_NAME}.final.bam
+	samtools index ${PROJECT_NAME}/${PROJECT_NAME}.final.bam
+	genomeCoverageBed -ibam ${PROJECT_NAME}/${PROJECT_NAME}.final.bam -g ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.genome > ${PROJECT_NAME}/${PROJECT_NAME}.depth_hist.tsv
+}
+
+function GATK_call
+{	
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+
+	# call variants by GATK
+	mkdir -p ${PROJECT_NAME}/${PROJECT_NAME}.gatk
+	run_gatk.sh -T UnifiedGenotyper -nt ${THREAD_NUM} -R ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta -I ${PROJECT_NAME}/${PROJECT_NAME}.final.bam -glm both -mbq 20 -hets 0.001 -indelHeterozygosity 0.000125 -l INFO -A AlleleBalance -A Coverage -stand_call_conf 30 -stand_emit_conf 10 -dcov 200 -rf BadCigar -o ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.both.vcf
+	run_gatk.sh -T SelectVariants -R ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta --variant ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.both.vcf -selectType SNP -o ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.SNP.vcf
+	run_gatk.sh -T SelectVariants -R ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta --variant ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.both.vcf -selectType INDEL -o ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.indel.vcf
+	run_gatk.sh -T VariantFiltration -R ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta --variant ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.SNP.vcf -o ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_filtered.SNP.vcf --clusterWindowSize 10 --filterExpression "MQ0>=4&&((MQ0/(DP+0.001))>0.1)" --filterName "HARD_TO_VALIDATE"
+	run_gatk.sh -T VariantFiltration -R ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta --variant ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.indel.vcf -o ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_filtered.indel.vcf --filterExpression "MQ0>=4&&((MQ0/(DP+0.001))>0.1)" --filterName "HARD_TO_VALIDATE" --filterExpression "QUAL<10" --filterName "QualFilter" --filterExpression "SB>=-1.0" --filterName "StrandBiasFilter"
+	awk '$7=="PASS"' ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_filtered.SNP.vcf > ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_remain.SNP.vcf
+	awk '$7=="PASS"' ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_filtered.indel.vcf > ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_remain.indel.vcf
+	
+	rm -f ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.both.vcf ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.raw.both.vcf.idx
+}
+
+function cnvnator_call
+{
+	SP_set BIN_SIZE=100
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+
+	# call CNV by cnvnator
+	mkdir -p ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator
+	mkdir -p ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/chr
+	cat ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta | splitFastabyChr.pl ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/chr
+	cnvnator -root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/01_tree.root -tree ${PROJECT_NAME}/${PROJECT_NAME}.final.bam -unique
+	cnvnator -root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/01_tree.root -his ${BIN_SIZE} -d ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/chrs/ -outroot ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/02_his.root
+	cp -f ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/02_his.root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/03_stat.root
+	cnvnator -root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/03_stat.root -stat ${BIN_SIZE}
+	cp -f ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/03_stat.root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/04_partition.root
+	cnvnator -root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/04_partition.root -partition ${BIN_SIZE}	
+	cnvnator -root ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/04_partition.root -call ${BIN_SIZE} > ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.cnv.raw
+	awk '$5<=0.05&&$6<=0.05&&$7<=0.05&&$8<=0.05&&$9<=0.5&&$9!=-1' ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.cnv.raw > ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.filtered.cnv.raw
+	sortBed -i <(cat ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.filtered.cnv.raw | sed -e 's/:/\t/' | sed -e 's/-/\t/' | sed -e 's/chr//g' | cut -f2-4,6) > ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.filtered.cnv.b37.bed
+}
+
+function indel_CNV_bed
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	SP_set INDEL_FLANK=5
+	
+	slopBed -i <(cat ${PROJECT_NAME}/${PROJECT_NAME}.gatk/${PROJECT_NAME}.GATK_remain.indel.vcf | awk '{OFS="\t"; print $1,$2-1,$2}') -g ${REFERENCE_DIR}/human_v37/human_g1k_v37.genome -b ${INDEL_FLANK} > ${PROJECT_NAME}/${PROJECT_NAME}.nearindel.bed
+	mergeBed -i <(sortBed -i <(cat ${PROJECT_NAME}/${PROJECT_NAME}.nearindel.bed ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.filtered.cnv.b37.bed | cut -f1-3)) > ${PROJECT_NAME}/${PROJECT_NAME}.indel_CNV.bed
+}
+
+function run_MosaicHunter
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	SP_set MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter"
+	SP_set MOSAICHUNTER_CONFIG="${MOSAICHUNTER_DIR}/my_conf/genome.properties"
+	SP_set ERROR_PRONE_BED="/home/yh174/reference/error_prone_bed/FSJ-M_XHX-F_ACC1-blood_PE.overlap.singularAF.bed"
+	SP_set OUTPUT_DIR="java_${PROJECT_NAME}"
+	SP_set MAX_RG_NUM=1000
+	
+	java -Xmx64G -jar ${MOSAICHUNTER_DIR}/build/mosaichunter.jar -C ${MOSAICHUNTER_CONFIG} -P input_file=${PROJECT_NAME}/${PROJECT_NAME}.final.bam -P mosaic_filter.sex=${SEX} -P indel_region_filter.bed_file=${PROJECT_NAME}/${PROJECT_NAME}.nearindel.bed -P output_dir=${OUTPUT_DIR} -P common_site_filter.bed_file=${ERROR_PRONE_BED} -P depth_filter.min_depth=${MIN_DEPTH} -P depth_filter.max_depth=${MAX_DEPTH} -P max_depth=${MAX_DEPTH} -P base_number_filter.min_minor_allele_number=${MIN_MREAD} -P base_number_filter.min_minor_allele_percentage=${MIN_MAF} -P mosaic_filter.mosaic_rate=${MOSAIC_RATE} -P clustered_filter.inner_distance=${CLUSTER_DISTANCE} -P clustered_filter.outer_distance=${CLUSTER_DISTANCE} -P base_number_filter.max_read_group_number=${MAX_RG_NUM}
+}
+
+function run_MosaicHunter_split
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	SP_set MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter"
+	SP_set MOSAICHUNTER_CONFIG="${MOSAICHUNTER_DIR}/my_conf/genome.properties"
+	SP_set ERROR_PRONE_BED="/home/yh174/reference/error_prone_bed/FSJ-M_XHX-F_ACC1-blood_PE.overlap.singularAF.bed"
+	SP_set OUTPUT_DIR="java_${PROJECT_NAME}"
+	SP_set START_CHR=1
+	SP_set END_CHR=22
+	SP_set MAX_RG_NUM=1000
+	
+	mkdir -p ${OUTPUT_DIR}
+	
+	SP_for_parallel _num={${START_CHR}..${END_CHR}} X Y
+	{
+		java -Xmx64G -jar ${MOSAICHUNTER_DIR}/build/mosaichunter.jar -C ${MOSAICHUNTER_CONFIG} -P input_file=${PROJECT_NAME}/${PROJECT_NAME}.final.bam -P mosaic_filter.sex=${SEX} -P indel_region_filter.bed_file=${PROJECT_NAME}/${PROJECT_NAME}.nearindel.bed -P output_dir=${OUTPUT_DIR}/${_num} -P common_site_filter.bed_file=${ERROR_PRONE_BED} -P depth_filter.min_depth=${MIN_DEPTH} -P depth_filter.max_depth=${MAX_DEPTH} -P max_depth=${MAX_DEPTH} -P base_number_filter.min_minor_allele_number=${MIN_MREAD} -P base_number_filter.min_minor_allele_percentage=${MIN_MAF} -P mosaic_filter.mosaic_rate=${MOSAIC_RATE} -P clustered_filter.inner_distance=${CLUSTER_DISTANCE} -P clustered_filter.outer_distance=${CLUSTER_DISTANCE} -P base_number_filter.max_read_group_number=${MAX_RG_NUM} -P valid_references=${_num}
+	}
+	
+	for i in {1..22} X Y; do cat ${OUTPUT_DIR}/$i/final.passed.tsv; done > ${OUTPUT_DIR}/final.passed.tsv
+}
+
+function run_ANNOVAR
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	SP_set TOOLS_DIR="/home/yh174/tools"
+
+	mkdir -p ${OUTPUT_DIR}/ANNOVAR
+	awk '{OFS="\t"; if($3==$7){alt=$9} if($3==$9){alt=$7} print $1,$2,$2,$3,alt}' ${INPUT_FILE} > ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input
+	annotate_variation.pl --geneanno --dbtype refgene --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype 1000g2015aug_all --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype snp138NonFlagged --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype esp6500si_all --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype exac03 --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype ljb26_all -otherinfo --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	annotate_variation.pl --filter --dbtype cosmic70 --buildver hg19 --outfile ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.input ${REFERENCE_DIR}/human_annovar/
+	rm -f ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.log
+	
+	cat ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.hg19_exac03_filtered ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.hg19_esp6500si_all_filtered ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.hg19_snp138NonFlagged_filtered ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.hg19_ALL.sites.2015_08_filtered | sort | uniq -c | awk '{if($1==4){print $2"\t"$3}}' > ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.tmp
+	myjoin -F1,2 -f3,4 <(myjoin -m -F1,2 -f1,2 ${INPUT_FILE} ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.tmp | cut -f1-24) ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.hg19_cosmic70_dropped | awk '{if($1=="="){i=2;while(i<=NF-7){printf $i"\t";i++}print $(NF-5)}if($1=="+"){i=2;while(i<=NF-1){printf $i"\t";i++}print $NF}}' > ${OUTPUT_DIR}/final.annovar_filtered.tsv
+	rm -f ${OUTPUT_DIR}/ANNOVAR/${PROJECT_NAME}.tmp
+}
+
+function scMH
+{
+	SP_set REFERENCE_DIR="/home/yh174/reference"
+	
+	mkdir -p scMH
+	mkdir -p scMH/${PROJECT_NAME}
+	
+	SP_for_parallel _num=$(grep -v ^Cell 1465_single-cells/1465_single-cells.list | cut -f1) 
+	{
+		cat ${INPUT_BED} | cut -f1,3 | while read chr pos; do \ 
+			samtools mpileup -f ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta 1465_single-cells/${_num}.bam -r $chr:$pos-$pos -s -B -q 0 -Q 0 -d 75000 | grep -v '^#'; \
+		done > scMH/${PROJECT_NAME}/${_num}.vcf
+		python scMH/BAQ_extraction.py scMH/${PROJECT_NAME}/${_num}.vcf > scMH/${PROJECT_NAME}/${_num}_BAQextraction.vcf
+	}
+	cat ${INPUT_BED} | cut -f1,3 | while read chr pos; do \
+		samtools mpileup -f ${REFERENCE_DIR}/human_hg19_Broad_hs37d5/human_hg19_Broad_hs37d5.fasta 1465_GM/1465_GM.bam -r $chr:$pos-$pos -s -B -q 0 -Q 0 -d 75000 | grep -v '^#'; \
+	done > scMH/${PROJECT_NAME}/1465_GM.vcf
+	python scMH/BAQ_extraction.py scMH/${PROJECT_NAME}/1465_GM.vcf > scMH/${PROJECT_NAME}/1465_GM_BAQextraction.vcf
+	
+	Rscript scMH.R scMH/${PROJECT_NAME}
+}
+
+function sum_run1
+{
+	SP_set MAX_NM=4
+	SP_set THREAD_NUM=1
+	
+	SP_run read_filter PROJECT_NAME=${PROJECT_NAME} MAX_NM=${MAX_NM}
+	SP_run GATK_call PROJECT_NAME=${PROJECT_NAME} THREAD_NUM=${THREAD_NUM}
+	SP_run cnvnator_call PROJECT_NAME=${PROJECT_NAME}
+	SP_run indel_CNV_bed PROJECT_NAME=${PROJECT_NAME}
+}
+
+function sum_run1_synthetic
+{
+	SP_set MAX_NM=4
+	SP_set THREAD_NUM=1
+	
+	SP_run bam_merge PROJECT_NAME=${PROJECT_NAME}
+	SP_run read_filter PROJECT_NAME=${PROJECT_NAME} MAX_NM=${MAX_NM}
+	SP_run GATK_call PROJECT_NAME=${PROJECT_NAME} THREAD_NUM=${THREAD_NUM}
+	mkdir -p ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator
+	touch ${PROJECT_NAME}/${PROJECT_NAME}.cnvnator/${PROJECT_NAME}.filtered.cnv.b37.bed
+	SP_run indel_CNV_bed PROJECT_NAME=${PROJECT_NAME}
+}
+
+function sum_run2
+{
+	SP_set MIN_DEPTH=50
+	SP_set MAX_DEPTH=400
+	SP_set MIN_MREAD=1
+	SP_set MIN_MAF=0
+	SP_set SEX="F"
+
+	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000
+	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability
+	
+	cat java_${PROJECT_NAME}_mappability/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
+	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
+	
+	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000
+	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability_1e-2/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2
+	
+	cat java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
+	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
+}
+
+function sum_run2_synthetic
+{
+	SP_set SIMULATION="False"
+	SP_set MIN_DEPTH=50
+	SP_set MAX_DEPTH=1500
+	SP_set MIN_MREAD=4
+	SP_set MIN_MAF=0
+	SP_set SEX="F"
+	SP_set CELL_NUM=16
+	SP_set MAX_RG_NUM=$((${CELL_NUM} / 2 + 1))
+
+	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star_RG.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000 MAX_RG_NUM=${MAX_RG_NUM}
+	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability
+	
+	cat java_${PROJECT_NAME}_mappability/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
+	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
+	
+	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star_RG.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000 MAX_RG_NUM=${MAX_RG_NUM}
+	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability_1e-2/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2
+	
+	cat java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
+	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
+}
