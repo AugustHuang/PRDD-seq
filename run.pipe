@@ -185,13 +185,13 @@ function sum_run2
 	SP_set MIN_MAF=0
 	SP_set SEX="F"
 
-	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000
+	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/scMH_real_bulk.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000
 	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability
 	
 	cat java_${PROJECT_NAME}_mappability/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
 	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
 	
-	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000
+	SP_run run_MosaicHunter_split MOSAICHUNTER_CONFIG=MosaicHunter_config/scMH_real_bulk.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000
 	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability_1e-2/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2
 	
 	cat java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
@@ -209,13 +209,13 @@ function sum_run2_synthetic
 	SP_set CELL_NUM=16
 	SP_set MAX_RG_NUM=$((${CELL_NUM} / 2 + 1))
 
-	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star_RG.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000 MAX_RG_NUM=${MAX_RG_NUM}
+	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/scMH_synthetic_bulk.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-6 CLUSTER_DISTANCE=20000 MAX_RG_NUM=${MAX_RG_NUM}
 	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability
 	
 	cat java_${PROJECT_NAME}_mappability/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
 	SP_run scMH PROJECT_NAME=${PROJECT_NAME} INPUT_BED=java_${PROJECT_NAME}_mappability/final.annovar_filtered.bed
 	
-	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/all_mappability_star_RG.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000 MAX_RG_NUM=${MAX_RG_NUM}
+	SP_run run_MosaicHunter_split MOSAICHUNTER_DIR="/home/yh174/tools/MosaicHunter_new" MOSAICHUNTER_CONFIG=MosaicHunter_config/scMH_synthetic_bulk.properties OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2 PROJECT_NAME=${PROJECT_NAME} SEX=${SEX} MIN_DEPTH=${MIN_DEPTH} MAX_DEPTH=${MAX_DEPTH} MIN_MREAD=${MIN_MREAD} MIN_MAF=${MIN_MAF} MOSAIC_RATE=1e-2 CLUSTER_DISTANCE=5000 MAX_RG_NUM=${MAX_RG_NUM}
 	SP_run run_ANNOVAR PROJECT_NAME=${PROJECT_NAME} INPUT_FILE=java_${PROJECT_NAME}_mappability_1e-2/final.passed.tsv OUTPUT_DIR=java_${PROJECT_NAME}_mappability_1e-2
 	
 	cat java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.tsv | awk '{OFS="\t"; print $1,$2-1,$2}' > java_${PROJECT_NAME}_mappability_1e-2/final.annovar_filtered.bed
